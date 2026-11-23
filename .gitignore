@@ -1,0 +1,11 @@
+# Local credentials — never commit. On a Space use Settings -> Secrets instead.
+.env
+.cdsapirc
+
+__pycache__/
+*.pyc
+.gradio/
+runs/
+# Pre-built cubes: in the dataset aaguilar90/cdh-demo-cubes, downloaded at start-up.
+cubes/
+*_test.html

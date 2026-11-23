@@ -1,0 +1,39 @@
+# Pinned to the versions this app was last tested with (hfspace env, Python 3.12).
+# Bump deliberately: a Space rebuild installs exactly these.
+
+# Crop model + spatial orchestration. Bundles the DSSAT binary as package data,
+# so no separate DSSAT install is needed. Pinned to a commit, not HEAD, so a new
+# push to the package cannot change a rebuilt Space without a change here.
+ag-cube-cm[mcp] @ git+https://github.com/CGIAR-Climate-Data-Hub/ag-cube-cm.git@2a34217dd005b67b5f8a46be1c6009acce14d470
+
+# Data acquisition. The [download] extra brings zarr/fsspec/aiohttp/dask, which
+# are what make the Hub-hosted CHIRPS and CHIRTS datacubes readable.
+aggeodata[download,mcp] @ git+https://github.com/CGIAR-Climate-Data-Hub/aggeodata.git@2e7cdb70075da08ee16772e77ef744560ed1d9be
+
+# Must match sdk_version in README.md.
+gradio==6.30.0
+matplotlib==3.11.2
+
+# The yield map: one Leaflet cell per simulated pixel over OpenStreetMap.
+folium==0.20.0
+branca==0.8.2
+
+# Planting-window and nitrogen-response charts, rendered by gr.Plot.
+plotly==7.1.0
+
+# Imported directly by the app (also pulled in by the packages above).
+numpy==2.5.4
+pandas==2.3.3
+xarray==2026.9.0
+
+# Reads a gitignored .env locally; on a Space the secrets are already in the
+# environment and this is simply unused.
+python-dotenv==1.2.4
+
+# --- agent app (app_agent.py) only ------------------------------------------
+# The MCP extras expose each package's own tool server; the agent reads tool
+# schemas from those servers rather than this app reimplementing the skill.
+# mcp must stay <2: both MCP servers import `mcp.server.fastmcp.FastMCP`, which
+# mcp 2.x renamed to `MCPServer`.
+mcp==1.30.0
+google-genai==2.31.0
