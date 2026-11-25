@@ -978,6 +978,30 @@ SOIL_LAYERS = ["clay", "sand", "silt", "bdod", "cfvo", "nitrogen", "phh2o", "soc
 SOIL_DEPTHS = ["0-5", "5-15", "15-30", "30-60"]
 
 
+def _missing_days(cube_path) -> list[str]:
+    """Days absent from inside a weather cube's own date range.
+
+    aggeodata stacks the days in parallel and skips a day that fails, with a
+    warning ("Skipping date 20250102: Reindexing only valid with uniquely valued
+    Index objects", seen once on the Space and not reproducible). DSSAT stops on
+    a gap in the weather, so one lost day fails every pixel of the season.
+    The ends are the data's own: a source that has not published the last days
+    yet is not a gap."""
+    import xarray as xr
+    p = pathlib.Path(str(cube_path))
+    try:
+        ds = xr.open_zarr(p) if p.suffix == ".zarr" or p.is_dir() else xr.open_dataset(p)
+        with ds:
+            days = pd.DatetimeIndex(ds["time"].values).normalize()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not read the days of climate cube %s: %s", p, exc)
+        return ["(unreadable)"]
+    if len(days) == 0:
+        return ["(no days)"]
+    full = pd.date_range(days.min(), days.max(), freq="D")
+    return [d.strftime("%Y-%m-%d") for d in full.difference(days)]
+
+
 def _missing_climate_vars(cube_path) -> list[str]:
     """Which of the variables DSSAT needs are absent from a weather cube.
 
@@ -1185,7 +1209,8 @@ def _acquire_sync(country_code, feature_name, adm_level, start_date, end_date):
         try:
             cached = json.loads(done.read_text(encoding="utf-8"))
             if (all(pathlib.Path(cached[k]).exists() for k in ("climate_cube", "soil_cube"))
-                    and not _missing_climate_vars(cached["climate_cube"])):
+                    and not _missing_climate_vars(cached["climate_cube"])
+                    and not _missing_days(cached["climate_cube"])):
                 log.info("acquire %s: cache hit", tag)
                 return cached
             log.warning("acquire %s: cached cubes incomplete, rebuilding", tag)
@@ -1219,6 +1244,22 @@ def _acquire_sync(country_code, feature_name, adm_level, start_date, end_date):
     run_download(str(cfg_path))
     _stage("building the climate cube")
     climate = run_datacube(str(cfg_path))
+    # A day skipped while stacking leaves a gap DSSAT cannot run through. The
+    # skip has been intermittent, so build the cube once more before refusing it.
+    gaps = _missing_days(climate)
+    if gaps:
+        log.warning("acquire %s: climate cube is missing %d day(s) %s; building it again",
+                    tag, len(gaps), gaps[:5])
+        shutil.rmtree(climate, ignore_errors=True)
+        climate = run_datacube(str(cfg_path))
+        gaps = _missing_days(climate)
+        if gaps:
+            raise RuntimeError(
+                f"the climate cube is missing {len(gaps)} day(s) ({', '.join(gaps[:5])}) "
+                "after two attempts to build it. DSSAT cannot run through a gap in "
+                "the weather, so the season cannot be simulated. Tell the user the "
+                "weather data for those days could not be assembled and to try "
+                "again later; do not suggest other causes.")
     # aggeodata logs a failed variable and carries on, and the cube builder
     # then quietly builds without it. A cube with no radiation makes DSSAT
     # return zero on every pixel, so refuse it here, loudly, naming the source.

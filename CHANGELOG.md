@@ -259,6 +259,21 @@ mcp 1.30.0, google-genai 2.31.0. `pip check` clean.
     result). Text a model writes between tool calls is shown while it works, but
     dropped from the final message, which keeps the progress lines and then the
     answer.
+22. **A lost weather day failed every pixel** (seen on the live Space: maize in
+    Huila, Colombia, 2025 at 0, 60 and 120 kg N gave "no simulated pixels").
+    While stacking the climate cube, aggeodata skipped 2025-01-02 ("Skipping date
+    20250102: Reindexing only valid with uniquely valued Index objects") and
+    carried on. That left 363 days instead of 364. DSSAT stops on a gap in the
+    weather (rc=99), and sowing was 2025-01-03, so all 707 pixels failed in all
+    three runs. The model then made up a cause (mountains, cultivar). The
+    sources are clean (CHIRPS and CHIRTS have no duplicate dates), and the same
+    download locally kept all 364 days: the skip is intermittent, inside
+    aggeodata's parallel per-day stacking. Now a cube with a day missing inside
+    its own range is built once more. If it is still missing days, the request
+    is refused with the dates and a plain reason, and DSSAT is not run. A cached
+    cube with a gap is rebuilt, not reused. Days a source has not published yet
+    at the end of the range are not counted as gaps. Offline: `gap_check` (9).
+    The skip itself is an aggeodata bug, still to report upstream.
 
 ## Pre-built cubes moved to a Hub dataset
 
@@ -599,6 +614,13 @@ Remaining tests:
 
   The offline BYOK checks (41) pass.
 
+- **Nandom differs between the Space and local runs**: 3,306 kg ha⁻¹ on the
+  Space (Linux) against 3,529 locally (Windows). Same code, same pinned
+  packages, byte-identical cubes, same sowing date (2020-05-09) and the same
+  15 pixels with yield. Not yet explained; the DSSAT binary per platform is the
+  first suspect.
+- **aggeodata**: report the intermittent skipped day during per-day stacking
+  (fix 22 works around it).
 - Citation text: hidden until you provide it.
 - The "Climate Data Hub" header link points to the GitHub org; no official CDH
   site URL was found in the repo.
