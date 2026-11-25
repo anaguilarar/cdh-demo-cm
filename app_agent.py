@@ -978,15 +978,20 @@ SOIL_LAYERS = ["clay", "sand", "silt", "bdod", "cfvo", "nitrogen", "phh2o", "soc
 SOIL_DEPTHS = ["0-5", "5-15", "15-30", "30-60"]
 
 
+# Missing weather days a cube may still carry into DSSAT, where ag-cube-cm fills
+# them by linear interpolation; it warns above five, and so do we, by refusing.
+MAX_GAP_DAYS = 5
+
+
 def _missing_days(cube_path) -> list[str]:
     """Days absent from inside a weather cube's own date range.
 
     aggeodata stacks the days in parallel and skips a day that fails, with a
     warning ("Skipping date 20250102: Reindexing only valid with uniquely valued
-    Index objects", seen once on the Space and not reproducible). DSSAT stops on
-    a gap in the weather, so one lost day fails every pixel of the season.
-    The ends are the data's own: a source that has not published the last days
-    yet is not a gap."""
+    Index objects", seen on the Space, not locally). ag-cube-cm then fills the
+    day by linear interpolation when it writes the weather file, so a lost day
+    is made-up weather rather than a failed run. The ends are the data's own:
+    a source that has not published the last days yet is not a gap."""
     import xarray as xr
     p = pathlib.Path(str(cube_path))
     try:
@@ -1070,25 +1075,32 @@ def _install_regular_sampling() -> None:
     SpatialCM._representative_pixels = _regular
 
 
-def _install_season_slice() -> None:
-    """Give each season job only its own weather, until ag-cube-cm ships it.
+# ag-cube-cm starts every DSSAT run this many days before sowing (SDATE in the
+# experiment file), and names the weather station after that start year.
+SIM_LEAD_DAYS = 30
 
-    The installed `_slice_season` calls `.values` on the numpy array that
-    `DatetimeIndex.year.isin` returns; the AttributeError is swallowed and the
-    job gets the whole series. DSSAT then counts NYERS from the weather span, so
-    the first season of a 2023-2025 cube is the mean of three seasons, the
-    second of two, and the zero-yield seasons are left out of those means.
+
+def _install_season_slice() -> None:
+    """Give each season job only its own weather, from the day DSSAT starts.
+
+    Older ag-cube-cm swallowed an AttributeError here and gave every job the
+    whole series, so DSSAT averaged several seasons into one. The pinned one
+    slices by calendar year from the SOWING year, but DSSAT starts 30 days
+    before sowing: a sowing in January starts in the previous December, which
+    the slice has dropped, and DSSAT stops on every pixel (rc=99; seen live for
+    Huila sown 3 Jan 2025 and Aipe sown 1 Jan 2025). Here the slice starts at
+    the simulation's start year. Each job is one season (number_years = 1), so
+    the extra December changes no average.
     """
     import pandas as pd
     from ag_cube_cm.spatial import spatial_cm
-    if getattr(spatial_cm, "_SEASON_SLICE_FIXED", False):
-        return
     span = getattr(spatial_cm, "_SEASON_SLICE_DAYS", 250)
 
     def _slice(ds, time_dim, year, pdate):
         times = pd.DatetimeIndex([pd.Timestamp(t) for t in ds[time_dim].values])
+        start_yr = min(year, (pdate - dt.timedelta(days=SIM_LEAD_DAYS)).year)
         harvest_yr = (pdate + dt.timedelta(days=span)).year
-        mask = np.asarray(times.year.isin(range(year, harvest_yr + 1)))
+        mask = np.asarray(times.year.isin(range(start_yr, harvest_yr + 1)))
         return ds.isel({time_dim: mask})
 
     spatial_cm._slice_season = _slice
@@ -1096,9 +1108,10 @@ def _install_season_slice() -> None:
 
 def _fitting_seasons(base_pdate, n_windows: int, step_days: int, crop: str,
                      first, last) -> list[int]:
-    """Seasons whose every sowing date, plus days to maturity, lies inside the
-    weather record [first, last]. Dates are built as SpatialCM builds its jobs:
-    each window's date moved to the season's year."""
+    """Seasons whose every simulation, from its start (SIM_LEAD_DAYS before
+    sowing) to maturity, lies inside the weather record [first, last]. Dates
+    are built as SpatialCM builds its jobs: each window's date moved to the
+    season's year."""
     from ag_cube_cm.spatial.spatial_cm import _shift_year
     first, last = pd.Timestamp(first), pd.Timestamp(last)
     days = _maturity_days(crop)
@@ -1107,7 +1120,8 @@ def _fitting_seasons(base_pdate, n_windows: int, step_days: int, crop: str,
         ok = True
         for w in range(max(1, int(n_windows or 1))):
             p = pd.Timestamp(_shift_year(base_pdate + dt.timedelta(days=w * int(step_days or 0)), yr))
-            if p < first or p + pd.Timedelta(days, unit="D") > last:
+            if (p - pd.Timedelta(SIM_LEAD_DAYS, unit="D") < first
+                    or p + pd.Timedelta(days, unit="D") > last):
                 ok = False
                 break
         if ok:
@@ -1244,8 +1258,10 @@ def _acquire_sync(country_code, feature_name, adm_level, start_date, end_date):
     run_download(str(cfg_path))
     _stage("building the climate cube")
     climate = run_datacube(str(cfg_path))
-    # A day skipped while stacking leaves a gap DSSAT cannot run through. The
-    # skip has been intermittent, so build the cube once more before refusing it.
+    # A day skipped while stacking would be filled by interpolation downstream.
+    # The skip has been intermittent, so build the cube once more to get the
+    # real weather; a short gap that survives is left to that interpolation,
+    # a long one (made-up rain over weeks) is refused.
     gaps = _missing_days(climate)
     if gaps:
         log.warning("acquire %s: climate cube is missing %d day(s) %s; building it again",
@@ -1253,13 +1269,17 @@ def _acquire_sync(country_code, feature_name, adm_level, start_date, end_date):
         shutil.rmtree(climate, ignore_errors=True)
         climate = run_datacube(str(cfg_path))
         gaps = _missing_days(climate)
-        if gaps:
+        if len(gaps) > MAX_GAP_DAYS:
             raise RuntimeError(
-                f"the climate cube is missing {len(gaps)} day(s) ({', '.join(gaps[:5])}) "
-                "after two attempts to build it. DSSAT cannot run through a gap in "
-                "the weather, so the season cannot be simulated. Tell the user the "
-                "weather data for those days could not be assembled and to try "
-                "again later; do not suggest other causes.")
+                f"the climate cube is missing {len(gaps)} days ({', '.join(gaps[:5])}"
+                f"{', …' if len(gaps) > 5 else ''}) after two attempts to build it. "
+                "Filling that many days would invent the weather, so the season "
+                "cannot be simulated. Tell the user the weather data for those "
+                "days could not be assembled and to try again later; do not "
+                "suggest other causes.")
+        if gaps:
+            log.warning("acquire %s: %d day(s) %s still missing; DSSAT input fills "
+                        "them by interpolation", tag, len(gaps), gaps)
     # aggeodata logs a failed variable and carries on, and the cube builder
     # then quietly builds without it. A cube with no radiation makes DSSAT
     # return zero on every pixel, so refuse it here, loudly, naming the source.
@@ -1791,7 +1811,8 @@ def _season_fit(config_path: str) -> dict | None:
     sows = [first_sow + pd.Timedelta(int(gap * k), unit='D') for k in range(n)]
     c0, c1 = pd.Timestamp(cube_first), pd.Timestamp(cube_last)
     late = [s for s in sows if s + pd.Timedelta(int(days), unit='D') > c1]
-    early = [s for s in sows if s < c0]
+    # DSSAT starts SIM_LEAD_DAYS before sowing and needs weather from then.
+    early = [s for s in sows if s - pd.Timedelta(SIM_LEAD_DAYS, unit='D') < c0]
     latest_first = c1 - pd.Timedelta(int(days + gap * (n - 1)), unit='D')
     fits_shifted = latest_first >= c0
     return {
@@ -1820,8 +1841,9 @@ def _season_fit_text(fit: dict) -> str:
                     f"for {fit['crop']}), but the cube ends on {fit['cube_last']}, so the "
                     f"crop would be cut off before maturity")
     if fit["before_cube"]:
-        bits.append(f"sowing on {', '.join(fit['before_cube'])} is before the cube "
-                    f"starts ({fit['cube_first']})")
+        bits.append(f"sowing on {', '.join(fit['before_cube'])} is less than "
+                    f"{SIM_LEAD_DAYS} days after the cube starts ({fit['cube_first']}); "
+                    f"the model starts {SIM_LEAD_DAYS} days before sowing")
     if fit["latest_first_sowing"]:
         k, g = fit["n_windows"], fit["window_days"]
         start = pd.Timestamp(fit["latest_first_sowing"])
@@ -4301,12 +4323,13 @@ PREBAKED_LIST = " · ".join(f"{t.title()} ({v.get('season', '?')})"
                            for t, v in sorted(prebaked_regions().items())) or "none"
 
 GH = "https://github.com/CGIAR-Climate-Data-Hub"
+AGWISE = "https://github.com/CGIAR-AgWise"
 HF_DATA = "https://huggingface.co/datasets/aaguilar90"
 SKILL_URL = f"https://cgiar-climate-data-hub.github.io/skills/skills/{SKILL}/"
 
 HEADER = f"""
 <header class='cdh-header'>
-  <div class='eyebrow'>CGIAR Climate Data Hub</div>
+  <div class='eyebrow'><a href='{AGWISE}' target='_blank' rel='noopener'>AgWise</a><span class='dot' aria-hidden='true'>·</span>CGIAR Climate Data Hub</div>
   <h1>Crop Yield Explorer</h1>
   <p class='lede'>Ask for a crop, a place and a season in plain language. An agent
   fetches climate and soil data, builds datacubes and runs the DSSAT crop model on
@@ -4430,6 +4453,9 @@ a { color: var(--accent-700); }
     font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
     color: var(--accent);
 }
+.cdh-header .eyebrow a { color: inherit; text-decoration: none; }
+.cdh-header .eyebrow a:hover { text-decoration: underline; }
+.cdh-header .eyebrow .dot { margin: 0 .5em; color: var(--ink-muted); }
 .cdh-header h1 {
     font-size: 26px; font-weight: 700; letter-spacing: -.015em; line-height: 1.2;
     color: #111827; margin: 2px 0 6px;

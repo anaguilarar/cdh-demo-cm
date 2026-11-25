@@ -259,21 +259,38 @@ mcp 1.30.0, google-genai 2.31.0. `pip check` clean.
     result). Text a model writes between tool calls is shown while it works, but
     dropped from the final message, which keeps the progress lines and then the
     answer.
-22. **A lost weather day failed every pixel** (seen on the live Space: maize in
-    Huila, Colombia, 2025 at 0, 60 and 120 kg N gave "no simulated pixels").
-    While stacking the climate cube, aggeodata skipped 2025-01-02 ("Skipping date
-    20250102: Reindexing only valid with uniquely valued Index objects") and
-    carried on. That left 363 days instead of 364. DSSAT stops on a gap in the
-    weather (rc=99), and sowing was 2025-01-03, so all 707 pixels failed in all
-    three runs. The model then made up a cause (mountains, cultivar). The
-    sources are clean (CHIRPS and CHIRTS have no duplicate dates), and the same
-    download locally kept all 364 days: the skip is intermittent, inside
-    aggeodata's parallel per-day stacking. Now a cube with a day missing inside
-    its own range is built once more. If it is still missing days, the request
-    is refused with the dates and a plain reason, and DSSAT is not run. A cached
-    cube with a gap is rebuilt, not reused. Days a source has not published yet
-    at the end of the range are not counted as gaps. Offline: `gap_check` (9).
-    The skip itself is an aggeodata bug, still to report upstream.
+22. **A weather day lost while building the cube** (seen twice on the live
+    Space, both times 2025-01-02). While stacking the days in parallel,
+    aggeodata skipped one day ("Skipping date 20250102: Reindexing only valid
+    with uniquely valued Index objects") and carried on, leaving 363 days
+    instead of 364. The sources are clean (CHIRPS and CHIRTS have no duplicate
+    dates), and the same download locally kept all 364 days. ag-cube-cm fills
+    such a day by linear interpolation when it writes the DSSAT weather file,
+    so the run still works, but on made-up weather for that day. Now a cube with
+    a day missing inside its own range is built once more; on the Space the
+    second build had all 364 days. If more than 5 days are still missing
+    (ag-cube-cm's own warning threshold), the request is refused with the
+    dates. A cached cube with a gap is rebuilt, not reused. Days a source has
+    not published yet at the end of the range are not gaps. The skip itself is
+    an aggeodata bug, still to report upstream.
+    *Correction:* this was first reported here as the cause of the Huila
+    failure. It was not; fix 23 is.
+23. **Every pixel failed for a sowing date in January** (seen live: maize in
+    Huila, sown 3 Jan 2025, and in Aipe, sown 1 Jan 2025, at 0, 60 and 120 kg N;
+    "no simulated pixels"). ag-cube-cm starts each DSSAT run 30 days before
+    sowing (SDATE) and names the weather file after that start year, but its
+    per-season slice keeps weather only from the sowing year on. A sowing in
+    January starts in the previous December, which had been dropped, so DSSAT
+    stopped on every pixel (rc=99). The model then made up a cause (mountains,
+    cultivar, dry spells). The slice now starts at the simulation's start year.
+    Each job is still one season (`number_years = 1`), so the extra December
+    changes no average, and sowings from February on get exactly the same
+    weather as before. The season fit and the sowing check now also require
+    weather from 30 days before sowing. Reproduced locally on Aipe 2025, 60 kg
+    N: before, 0 pixels with a result and 44 failed (rc=99); after, 44 with a
+    result, mean 4,756 kg ha⁻¹. The fix belongs in ag-cube-cm
+    (`spatial_cm._slice_season`); the app applies it until then.
+    Offline: `gap_check` (14, fixes 22 and 23).
 
 ## Pre-built cubes moved to a Hub dataset
 
@@ -346,6 +363,9 @@ be run on a private duplicate Space before it is turned on.
   launcher that wraps the provider calls.
 
 ## UI improvements
+
+- **Header**: the eyebrow line now reads "AgWise · CGIAR Climate Data Hub",
+  with AgWise linking to https://github.com/CGIAR-AgWise.
 
 - **Look**: white ground, neutral greys, one accent (#2e7d4f) across theme,
   bars, best-bar highlight and map ramp. Field labels ("Run", "Sowing date") as
@@ -621,6 +641,9 @@ Remaining tests:
   first suspect.
 - **aggeodata**: report the intermittent skipped day during per-day stacking
   (fix 22 works around it).
+- **ag-cube-cm**: report that `_slice_season` drops the 30 days before a January
+  sowing (fix 23 works around it).
+- When every pixel fails, the model still makes up a cause in the answer.
 - Citation text: hidden until you provide it.
 - The "Climate Data Hub" header link points to the GitHub org; no official CDH
   site URL was found in the repo.
